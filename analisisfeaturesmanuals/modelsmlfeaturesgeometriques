@@ -1,0 +1,655 @@
+# ─────────────────────────────────────────────────────────────
+# MODELS DE MACHINE LEARNING — NOMÉS FEATURES GEOMÈTRIQUES
+# Classificació de 5 patologies cardíaques (ACDC) a nivell de pacient.
+# ─────────────────────────────────────────────────────────────
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from collections import Counter
+
+from sklearn.model_selection import StratifiedKFold, GridSearchCV
+from sklearn.metrics import confusion_matrix
+from sklearn.inspection import permutation_importance
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
+                             f1_score, precision_score, recall_score,
+                             classification_report)
+import shap
+import xgboost as xgb
+
+import warnings, os
+os.environ["OMP_NUM_THREADS"] = "1"
+warnings.filterwarnings("ignore")
+import matplotlib
+matplotlib.use("Agg")   # només si guardes figures en lloc de mostrar-les
+
+
+# ── CONFIGURACIÓ GENERAL ──────────────────────────────────────
+PHASE = 'ED'                   # ED o ES (sístole / diàstole)
+SCORING = 'accuracy'
+RANDOM_STATE = 42
+CV_SPLITS = 5
+N_REPEATS_PERM = 30            # Permutation importance
+
+# Kernel SHAP (models no arboris)
+KMEANS_BG = 200                # nº clusters per al background
+NSAMPLES_KERNEL = 1000         # mostres SHAP (més = més precís, més lent)
+EXPLAIN_ALL_TEST = True
+EXPLAIN_TEST_SUBSAMPLE = 500
+
+
+# ── CÀRREGA I PREPROCESSAT ────────────────────────────────────
+df_train = pd.read_csv('summary_training.csv')
+df_test  = pd.read_csv('summary_testing.csv')
+
+# Columnes que NO són features (identificadors i target)
+excluded = ['PatientID', 'Phase', 'Patient_group']
+
+# Els CSV ja contenen NOMÉS descriptors geomètrics (les de textura/intensitat
+# es van eliminar en generar els summary). Per tant només cal agafar totes les
+# numèriques i excloure els identificadors; solidity i Height/Weight es conserven.
+feature_cols = (
+    df_train
+      .drop(columns=excluded)
+      .select_dtypes(include=['number'])
+      .columns
+      .tolist()
+)
+
+
+def reducir_features_correlacionadas(df, features, threshold=0.97):
+    corr_matrix = df[features].corr().abs()
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+
+    grupos = []
+    ya_asignadas = set()
+    usada_como_central = set()
+    a_eliminar = set()
+
+    for col in upper.columns:
+        if col in ya_asignadas:
+            continue
+
+        correladas = upper[col][upper[col] > threshold].index.tolist()
+        if correladas:
+            grupo = [col] + correladas
+            grupo = list(set(grupo))
+            grupos.append(grupo)
+
+            representante = None
+            for var in grupo:
+                if var in usada_como_central:
+                    representante = var
+                    break
+            if not representante:
+                representante = grupo[0]
+                usada_como_central.add(representante)
+
+            for var in grupo:
+                if var != representante:
+                    a_eliminar.add(var)
+
+            ya_asignadas.update(grupo)
+
+    print(f"\nReduint {len(set(sum(grupos, [])))} variables correlacionades a {len(usada_como_central)}:")
+    for grupo in grupos:
+        representante = next((v for v in grupo if v in usada_como_central), grupo[0])
+        print(f"Grup: {grupo} → conservant: {representante}")
+        for i in range(len(grupo)):
+            for j in range(i + 1, len(grupo)):
+                v1, v2 = grupo[i], grupo[j]
+                corr_value = corr_matrix.loc[v1, v2]
+                print(f"    · Correlació entre {v1} i {v2}: {corr_value:.4f}")
+
+    final_features = [f for f in features if f not in a_eliminar]
+    return final_features
+
+
+# Reducció de features molt correlacionades (|r| > 0.97)
+feature_cols = reducir_features_correlacionadas(df_train, feature_cols, threshold=0.97)
+
+# Filtratge per fase (una fila per pacient en la fase escollida)
+mask_tr = df_train['Phase'].eq(PHASE)
+mask_te = df_test['Phase'].eq(PHASE)
+
+X_all_train = df_train.loc[mask_tr, feature_cols].values
+y_all_train = df_train.loc[mask_tr, 'Patient_group'].values
+
+X_all_test  = df_test.loc[mask_te, feature_cols].values
+y_all_test  = df_test.loc[mask_te, 'Patient_group'].values
+
+classes_ = np.unique(y_all_train)
+
+# ── Verificació ràpida (pots comentar-ho un cop confirmat) ─────
+print(f"\nFeatures geomètriques usades ({len(feature_cols)}): {feature_cols}")
+print(f"Train: {X_all_train.shape} | Test: {X_all_test.shape}")
+print(f"Classes: {classes_}")
+
+CV = StratifiedKFold(n_splits=CV_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+
+
+# ── FUNCIONS AUXILIARS ────────────────────────────────────────
+def run_grid(name, estimator, param_grid, X, y):
+    grid = GridSearchCV(
+        estimator=estimator,
+        param_grid=param_grid,
+        cv=CV,
+        scoring=SCORING,
+        n_jobs=-1,
+        refit=True,
+        error_score='raise'
+    )
+    grid.fit(X, y)
+    print(f"\n=== {name} ===")
+    print("Millors paràmetres:", grid.best_params_)
+    print(f"Millor mitjana CV: {grid.best_score_:.4f}")
+    top5 = (pd.DataFrame(grid.cv_results_)[['params', 'mean_test_score', 'std_test_score']]
+            .sort_values('mean_test_score', ascending=False)
+            .head(5))
+    print(top5.to_string(index=False))
+    return grid.best_estimator_, grid
+
+
+def perm_importance_test(model, X_test, y_test, title_prefix):
+    perm = permutation_importance(
+        model, X_test, y_test,
+        n_repeats=N_REPEATS_PERM,
+        random_state=RANDOM_STATE,
+        scoring=SCORING
+    )
+    importances = perm.importances_mean
+    idx = np.argsort(importances)[::-1]
+    feat = [feature_cols[i] for i in idx]
+    imp  = importances[idx]
+    print(f"\nFeature importances (permutation-based, test) - {title_prefix}:")
+    for j in idx:
+        print(f"{feature_cols[j]}: {perm.importances_mean[j]:.4f} ± {perm.importances_std[j]:.4f}")
+    plt.figure(figsize=(12, 8))
+    plt.barh(feat, imp)
+    plt.gca().invert_yaxis()
+    plt.xlabel('Importància (perm test)')
+    plt.title(f'Feature Importance (Permutation - Test) - {title_prefix}')
+    plt.tight_layout()
+    plt.show()
+    return perm
+
+
+# ── SHAP helpers ──────────────────────────────────────────────
+def _shap_to_3d(shap_values, class_names):
+    if isinstance(shap_values, list):
+        return np.stack(shap_values, axis=-1)
+    sv = np.asarray(shap_values)
+    if sv.ndim == 2:
+        sv = sv[..., np.newaxis]
+    return sv
+
+
+def _boxplots_per_class(abs_shap_3d, feat_names, class_names, prefix, figsize=(12, 6)):
+    for i, cname in enumerate(class_names):
+        df_shap = pd.DataFrame(abs_shap_3d[:, :, i], columns=feat_names)
+        plt.figure(figsize=figsize)
+        df_shap.boxplot()
+        plt.xticks(rotation=90)
+        plt.title(f'{prefix} - Classe {cname}')
+        plt.tight_layout()
+        plt.show()
+
+
+def shap_tree(model, X_test, feat_names, class_names, prefix):
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X_test)
+    abs_all = np.abs(_shap_to_3d(shap_values, class_names))
+    _boxplots_per_class(abs_all, feat_names, class_names, prefix)
+    imp_mean = abs_all.mean(axis=(0, 2))
+    imp_max  = abs_all.mean(axis=0).max(axis=1)
+    return imp_mean, imp_max
+
+
+def shap_linear(model, X_train, X_test, feat_names, class_names, prefix):
+    masker = shap.maskers.Independent(X_train)
+    explainer = shap.LinearExplainer(model, masker=masker)
+    shap_values = explainer.shap_values(X_test)
+    abs_all = np.abs(_shap_to_3d(shap_values, class_names))
+    _boxplots_per_class(abs_all, feat_names, class_names, prefix)
+    imp_mean = abs_all.mean(axis=(0, 2))
+    imp_max  = abs_all.mean(axis=0).max(axis=1)
+    return imp_mean, imp_max
+
+
+def shap_kernel(model, X_train, X_test, feat_names, class_names, prefix,
+                bg_kmeans=KMEANS_BG, nsamples=NSAMPLES_KERNEL,
+                explain_all=EXPLAIN_ALL_TEST, explain_n=EXPLAIN_TEST_SUBSAMPLE):
+
+    n_clusters = min(bg_kmeans, X_train.shape[0])
+    background = shap.kmeans(X_train, n_clusters) if n_clusters >= 2 else X_train
+
+    if explain_all:
+        X_exp = X_test
+    else:
+        rng = np.random.default_rng(RANDOM_STATE)
+        sel = rng.choice(X_test.shape[0], min(explain_n, X_test.shape[0]), replace=False)
+        X_exp = X_test[sel]
+
+    explainer = shap.KernelExplainer(model.predict_proba, background)
+    shap_values = explainer.shap_values(X_exp, nsamples=nsamples)
+
+    abs_all = np.abs(_shap_to_3d(shap_values, class_names))
+    _boxplots_per_class(abs_all, feat_names, class_names, prefix)
+    imp_mean = abs_all.mean(axis=(0, 2))
+    imp_max  = abs_all.mean(axis=0).max(axis=1)
+    return imp_mean, imp_max
+
+
+# ── ENCODING D'ETIQUETES UNIFICAT ─────────────────────────────
+# Un únic LabelEncoder per a tots els models (abans KNN usava .cat.codes,
+# que era inconsistent). Amb 5 classes alfabètiques el mapatge és el mateix,
+# però així queda coherent i sense fragilitats.
+le = LabelEncoder()
+y_train_enc = le.fit_transform(y_all_train)
+y_test_enc  = le.transform(y_all_test)
+class_names = list(le.classes_)   # ['DCM','HCM','MINF','NOR','RV']
+
+
+# ── RANDOM FOREST ─────────────────────────────────────────────
+rf_param_grid = {
+    'n_estimators': [100, 200, 300],
+    'max_depth': [None, 4, 8],
+    'min_samples_leaf': [1, 2, 4],
+    'max_features': ['sqrt', 'log2']
+}
+
+rf_estimator, rf_grid = run_grid('RF', RandomForestClassifier(random_state=RANDOM_STATE),
+                                 rf_param_grid, X_all_train, y_all_train)
+
+y_pred_rf = rf_estimator.predict(X_all_test)
+acc_rf = accuracy_score(y_all_test, y_pred_rf)
+print(f"\nAccuracy en test (RF): {acc_rf:.4f}")
+print("Classification report (RF):")
+print(classification_report(y_all_test, y_pred_rf))
+print("Matriu de confusió (RF):")
+print(confusion_matrix(y_all_test, y_pred_rf))
+
+perm_rf = perm_importance_test(rf_estimator, X_all_test, y_all_test, 'RF')
+imp_shap_mean_rf, imp_shap_max_rf = shap_tree(rf_estimator, X_all_test, feature_cols,
+                                              rf_estimator.classes_,
+                                              'Boxplot SHAP absolute values - RF')
+
+df_rank_rf = pd.DataFrame({
+    'Permutation_test': perm_rf.importances_mean,
+    'SHAP_mean':        imp_shap_mean_rf,
+    'SHAP_max':         imp_shap_max_rf
+}, index=feature_cols)
+print("\nSpearman RF:")
+print(df_rank_rf.corr(method='spearman').to_string())
+
+print("Baseline train RF:", accuracy_score(y_all_train, rf_estimator.predict(X_all_train)))
+print("Baseline test  RF:", acc_rf)
+
+fi_rf = pd.Series(rf_estimator.feature_importances_, index=feature_cols).sort_values(ascending=False)
+print("\nFeature Importance (model - RF):")
+print(fi_rf.head(10))
+
+plt.figure(figsize=(10, 6))
+fi_rf.head(10).plot(kind='barh')
+plt.gca().invert_yaxis()
+plt.title("Top 10 Feature Importance - RF (model)")
+plt.xlabel("Importància")
+plt.tight_layout()
+plt.show()
+
+
+# ── XGBOOST ───────────────────────────────────────────────────
+xgb_param_grid = {
+    'n_estimators': [100, 200, 300],
+    'max_depth': [3, 6, 9],
+    'learning_rate': [0.01, 0.1, 0.2],
+    'subsample': [0.7, 0.85, 1.0],
+    'colsample_bytree': [0.7, 0.85, 1.0],
+    'gamma': [0, 1, 5]
+}
+
+xgb_clf = xgb.XGBClassifier(random_state=RANDOM_STATE, objective='multi:softprob',
+                            num_class=len(class_names), eval_metric='mlogloss')
+xgb_estimator, xgb_grid = run_grid('XGB', xgb_clf, xgb_param_grid, X_all_train, y_train_enc)
+
+y_pred_xgb = xgb_estimator.predict(X_all_test)
+acc_xgb = accuracy_score(y_test_enc, y_pred_xgb)
+print(f"\nAccuracy en test (XGB): {acc_xgb:.4f}")
+print("Classification report (XGB):")
+print(classification_report(y_test_enc, y_pred_xgb, digits=4, zero_division=0))
+print("Matriu de confusió (XGB):")
+print(confusion_matrix(y_test_enc, y_pred_xgb))
+
+perm_xgb = perm_importance_test(xgb_estimator, X_all_test, y_test_enc, 'XGB')
+imp_shap_mean_xgb, imp_shap_max_xgb = shap_tree(xgb_estimator, X_all_test, feature_cols,
+                                                class_names,
+                                                'Boxplot SHAP absolute values - XGB')
+
+df_rank_xgb = pd.DataFrame({
+    'Permutation_test': perm_xgb.importances_mean,
+    'SHAP_mean':        imp_shap_mean_xgb,
+    'SHAP_max':         imp_shap_max_xgb
+}, index=feature_cols)
+print("\nSpearman XGB:")
+print(df_rank_xgb.corr(method='spearman').to_string())
+
+
+# ── SVM ───────────────────────────────────────────────────────
+svm_pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('svc', SVC(random_state=RANDOM_STATE, probability=True))
+])
+svm_param_grid = {
+    'svc__C': [0.1, 1, 10, 100],
+    'svc__kernel': ['linear', 'rbf'],
+    'svc__gamma': ['scale', 'auto']
+}
+
+svm_estimator, svm_grid = run_grid('SVM', svm_pipe, svm_param_grid, X_all_train, y_train_enc)
+
+y_pred_svm = svm_estimator.predict(X_all_test)
+acc_svm = accuracy_score(y_test_enc, y_pred_svm)
+print(f"\nAccuracy en test (SVM): {acc_svm:.4f}")
+print("Classification report (SVM):")
+print(classification_report(y_test_enc, y_pred_svm, digits=4, zero_division=0))
+print("Matriu de confusió (SVM):")
+print(confusion_matrix(y_test_enc, y_pred_svm))
+
+perm_svm = perm_importance_test(svm_estimator, X_all_test, y_test_enc, 'SVM')
+imp_shap_mean_svm, imp_shap_max_svm = shap_kernel(svm_estimator, X_all_train, X_all_test,
+                                                  feature_cols, class_names,
+                                                  'Boxplot SHAP absolute values - SVM')
+
+df_rank_svm = pd.DataFrame({
+    'Permutation_test': perm_svm.importances_mean,
+    'SHAP_mean':        imp_shap_mean_svm,
+    'SHAP_max':         imp_shap_max_svm
+}, index=feature_cols)
+print("\nSpearman SVM:")
+print(df_rank_svm.corr(method='spearman').to_string())
+
+
+# ── MLP ───────────────────────────────────────────────────────
+mlp_pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('mlp', MLPClassifier(random_state=RANDOM_STATE, max_iter=500))
+])
+mlp_param_grid = {
+    'mlp__hidden_layer_sizes': [(50,), (100,), (50, 50), (100, 50)],
+    'mlp__activation': ['relu', 'tanh'],
+    'mlp__alpha': [1e-4, 1e-3, 1e-2],
+    'mlp__learning_rate_init': [1e-3, 1e-2],
+    'mlp__solver': ['adam']
+}
+
+mlp_estimator, mlp_grid = run_grid('MLP', mlp_pipe, mlp_param_grid, X_all_train, y_train_enc)
+
+y_pred_mlp = mlp_estimator.predict(X_all_test)
+acc_mlp = accuracy_score(y_test_enc, y_pred_mlp)
+print(f"\nAccuracy en test (MLP): {acc_mlp:.4f}")
+print("Classification report (MLP):")
+print(classification_report(y_test_enc, y_pred_mlp, digits=4, zero_division=0))
+print("Matriu de confusió (MLP):")
+print(confusion_matrix(y_test_enc, y_pred_mlp))
+
+perm_mlp = perm_importance_test(mlp_estimator, X_all_test, y_test_enc, 'MLP')
+imp_shap_mean_mlp, imp_shap_max_mlp = shap_kernel(mlp_estimator, X_all_train, X_all_test,
+                                                  feature_cols, class_names,
+                                                  'Boxplot SHAP absolute values - MLP')
+
+df_rank_mlp = pd.DataFrame({
+    'Permutation_test': perm_mlp.importances_mean,
+    'SHAP_mean':        imp_shap_mean_mlp,
+    'SHAP_max':         imp_shap_max_mlp
+}, index=feature_cols)
+print("\nSpearman MLP:")
+print(df_rank_mlp.corr(method='spearman').to_string())
+
+
+# ── KNN (ara amb el mateix LabelEncoder que la resta) ─────────
+knn_pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', KNeighborsClassifier())
+])
+knn_param_grid = {
+    'clf__n_neighbors': [3, 5],
+    'clf__weights': ['uniform', 'distance'],
+    'clf__p': [1, 2]
+}
+
+knn_estimator, knn_grid = run_grid('KNN', knn_pipe, knn_param_grid, X_all_train, y_train_enc)
+
+y_pred_knn = knn_estimator.predict(X_all_test)
+acc_knn = accuracy_score(y_test_enc, y_pred_knn)
+print(f"\nAccuracy en test (KNN): {acc_knn:.4f}")
+print("Classification report (KNN):")
+print(classification_report(y_test_enc, y_pred_knn))
+print("Matriu de confusió (KNN):")
+print(confusion_matrix(y_test_enc, y_pred_knn))
+
+perm_knn = perm_importance_test(knn_estimator, X_all_test, y_test_enc, 'KNN')
+imp_shap_mean_knn, imp_shap_max_knn = shap_kernel(knn_estimator, X_all_train, X_all_test,
+                                                  feature_cols, class_names,
+                                                  'Boxplot SHAP absolute values - KNN')
+
+df_rank_knn = pd.DataFrame({
+    'Permutation_test': perm_knn.importances_mean,
+    'SHAP_mean':        imp_shap_mean_knn,
+    'SHAP_max':         imp_shap_max_knn
+}, index=feature_cols)
+print("\nSpearman KNN:")
+print(df_rank_knn.corr(method='spearman').to_string())
+
+
+# ── LOGISTIC REGRESSION ───────────────────────────────────────
+lr_pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', LogisticRegression(random_state=RANDOM_STATE))
+])
+lr_param_grid = {
+    'clf__penalty': ['l2'],
+    'clf__solver': ['lbfgs', 'saga'],
+    'clf__C': [0.01, 0.1, 1, 10],
+    'clf__max_iter': [1000, 2000, 3000]
+}
+
+lr_estimator, lr_grid = run_grid('LR', lr_pipe, lr_param_grid, X_all_train, y_all_train)
+
+y_pred_lr = lr_estimator.predict(X_all_test)
+acc_lr = accuracy_score(y_all_test, y_pred_lr)
+print(f"\nAccuracy en test (LR): {acc_lr:.4f}")
+print("Classification report (LR):")
+print(classification_report(y_all_test, y_pred_lr, zero_division=0))
+print("Matriu de confusió (LR):")
+print(confusion_matrix(y_all_test, y_pred_lr))
+
+perm_lr = permutation_importance(
+    lr_estimator, X_all_test, y_all_test,
+    n_repeats=N_REPEATS_PERM,
+    random_state=RANDOM_STATE,
+    scoring=SCORING
+)
+
+masker = shap.maskers.Independent(X_all_train)
+explainer_lr = shap.Explainer(lr_estimator.named_steps['clf'], masker)
+shap_values_lr = explainer_lr(X_all_test).values
+abs_lr = np.abs(_shap_to_3d(shap_values_lr, lr_estimator.named_steps['clf'].classes_))
+
+_boxplots_per_class(abs_lr, feature_cols, lr_estimator.named_steps['clf'].classes_,
+                    'Boxplot SHAP absolute values - LR')
+
+imp_shap_mean_lr = abs_lr.mean(axis=(0, 2))
+imp_shap_max_lr  = abs_lr.mean(axis=0).max(axis=1)
+
+df_rank_lr = pd.DataFrame({
+    'Permutation_test': perm_lr.importances_mean,
+    'SHAP_mean':        imp_shap_mean_lr,
+    'SHAP_max':         imp_shap_max_lr
+}, index=feature_cols)
+print("\nSpearman LR:")
+print(df_rank_lr.corr(method='spearman').to_string())
+
+
+# ── RESUM FINAL ───────────────────────────────────────────────
+print("\n===== RESUM ACCURACY TEST =====")
+print(f"RF : {acc_rf:.4f}")
+print(f"XGB: {acc_xgb:.4f}")
+print(f"SVM: {acc_svm:.4f}")
+print(f"MLP: {acc_mlp:.4f}")
+print(f"KNN: {acc_knn:.4f}")
+print(f"LR : {acc_lr:.4f}")
+
+results = []
+
+def add_result(name, y_true, y_pred):
+    results.append({
+        'model': name,
+        'accuracy': accuracy_score(y_true, y_pred),
+        'balanced_acc': balanced_accuracy_score(y_true, y_pred),
+        'f1_macro': f1_score(y_true, y_pred, average='macro', zero_division=0),
+        'f1_weighted': f1_score(y_true, y_pred, average='weighted', zero_division=0),
+        'precision_macro': precision_score(y_true, y_pred, average='macro', zero_division=0),
+        'recall_macro': recall_score(y_true, y_pred, average='macro', zero_division=0)
+    })
+
+# Tots els models usen ara y_test_enc (mateix encoding); RF i LR també hi són
+# comparables perquè le.transform manté el mateix ordre de classes.
+add_result('RF',  y_test_enc, le.transform(y_pred_rf))
+add_result('XGB', y_test_enc, y_pred_xgb)
+add_result('SVM', y_test_enc, y_pred_svm)
+add_result('MLP', y_test_enc, y_pred_mlp)
+add_result('KNN', y_test_enc, y_pred_knn)
+add_result('LR',  y_test_enc, le.transform(y_pred_lr))
+
+results_df = (pd.DataFrame(results)
+              .set_index('model')
+              .sort_values('accuracy', ascending=False))
+
+print("\n=== RESULTATS ===")
+print(results_df.round(4))
+
+best_by_metric = results_df.idxmax()
+print("\n=== MILLOR MODEL PER MÈTRICA ===")
+print(best_by_metric.to_string())
+
+ties = {m: results_df.index[results_df[m] == results_df[m].max()].tolist()
+        for m in results_df.columns if (results_df[m] == results_df[m].max()).sum() > 1}
+if ties:
+    print("\nEmpats detectats:")
+    for m, mods in ties.items():
+        print(f"{m}: {mods}")
+
+
+# ── PER CLASSE (F1) ───────────────────────────────────────────
+def per_class_report(name, y_true, y_pred):
+    rep = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
+    df = pd.DataFrame(rep).T
+    df['model'] = name
+    return df
+
+per_class = pd.concat([
+    per_class_report('RF',  y_test_enc, le.transform(y_pred_rf)),
+    per_class_report('XGB', y_test_enc, y_pred_xgb),
+    per_class_report('SVM', y_test_enc, y_pred_svm),
+    per_class_report('MLP', y_test_enc, y_pred_mlp),
+    per_class_report('KNN', y_test_enc, y_pred_knn),
+    per_class_report('LR',  y_test_enc, le.transform(y_pred_lr)),
+])
+
+best_f1_per_class = (
+    per_class.reset_index()
+             .rename(columns={'index': 'class'})
+             .sort_values(['class', 'f1-score'], ascending=[True, False])
+             .groupby('class')
+             .head(1)[['class', 'model', 'f1-score']]
+)
+print("\n=== MILLOR MODEL PER CLASSE (F1) ===")
+print(best_f1_per_class.to_string(index=False))
+
+
+# ── SHAP absoluts per a tots els models (per als gràfics agregats) ──
+abs_rf  = np.abs(_shap_to_3d(shap.TreeExplainer(rf_estimator).shap_values(X_all_test),
+                             rf_estimator.classes_))
+abs_xgb = np.abs(_shap_to_3d(shap.TreeExplainer(xgb_estimator).shap_values(X_all_test),
+                             class_names))
+
+explainer_svm = shap.KernelExplainer(svm_estimator.predict_proba,
+                                     shap.kmeans(X_all_train, min(KMEANS_BG, X_all_train.shape[0])))
+abs_svm = np.abs(_shap_to_3d(explainer_svm.shap_values(X_all_test, nsamples=NSAMPLES_KERNEL),
+                             class_names))
+
+explainer_mlp = shap.KernelExplainer(mlp_estimator.predict_proba,
+                                     shap.kmeans(X_all_train, min(KMEANS_BG, X_all_train.shape[0])))
+abs_mlp = np.abs(_shap_to_3d(explainer_mlp.shap_values(X_all_test, nsamples=NSAMPLES_KERNEL),
+                             class_names))
+
+explainer_knn = shap.KernelExplainer(knn_estimator.predict_proba,
+                                     shap.kmeans(X_all_train, min(KMEANS_BG, X_all_train.shape[0])))
+abs_knn = np.abs(_shap_to_3d(explainer_knn.shap_values(X_all_test, nsamples=NSAMPLES_KERNEL),
+                             class_names))
+
+masker = shap.maskers.Independent(X_all_train)
+explainer_lr = shap.Explainer(lr_estimator.named_steps['clf'], masker)
+abs_lr = np.abs(_shap_to_3d(explainer_lr(X_all_test).values,
+                            lr_estimator.named_steps['clf'].classes_))
+
+
+# ── TOP FEATURES PER CLASSE ───────────────────────────────────
+top_counts_per_class = {cls: Counter() for cls in class_names}
+shap_abs_all = [abs_rf, abs_xgb, abs_svm, abs_mlp, abs_knn, abs_lr]
+
+for shap_model in shap_abs_all:
+    mean_sv = shap_model.mean(axis=0)  # (features, classes)
+    for i, cls in enumerate(class_names):
+        top5_idx = np.argsort(mean_sv[:, i])[::-1][:5]
+        for idx in top5_idx:
+            top_counts_per_class[cls][feature_cols[idx]] += 1
+
+max_count_global = max(max(c.values()) for c in top_counts_per_class.values())
+
+fig, axs = plt.subplots(nrows=len(class_names),
+                        figsize=(10, 3 * len(class_names)), constrained_layout=True)
+for i, cls in enumerate(class_names):
+    top_feats = top_counts_per_class[cls].most_common(10)
+    feats, counts = zip(*top_feats)
+    axs[i].barh(feats, counts)
+    axs[i].invert_yaxis()
+    axs[i].set_title(f"Top features - {cls}")
+    axs[i].set_xlabel("Vegades al top 5")
+    axs[i].set_xlim(0, max_count_global)
+fig.suptitle("Freqüència d'aparició al Top 5 SHAP per classe (tots els models)", fontsize=14)
+plt.show()
+
+df_summary = pd.DataFrame.from_dict(
+    {cls: dict(counter) for cls, counter in top_counts_per_class.items()},
+    orient='index'
+).T.fillna(0).astype(int)
+
+
+# ── PERMUTATION IMPORTANCE MITJANA (TOP 10) ───────────────────
+df_perm_all = pd.DataFrame({
+    'RF':  perm_rf.importances_mean,
+    'XGB': perm_xgb.importances_mean,
+    'SVM': perm_svm.importances_mean,
+    'MLP': perm_mlp.importances_mean,
+    'KNN': perm_knn.importances_mean,
+    'LR':  perm_lr.importances_mean
+}, index=feature_cols)
+
+top_features = df_perm_all.mean(axis=1).sort_values(ascending=False).head(10).index
+df_top = df_perm_all.loc[top_features]
+
+df_top.T.plot(kind='bar', figsize=(12, 6))
+plt.title('Permutation Importance mitjana (Top 10 features)')
+plt.ylabel('Importància (caiguda mitjana en accuracy)')
+plt.xlabel('Model')
+plt.xticks(rotation=0)
+plt.legend(title='Feature', bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.tight_layout()
+plt.show()
