@@ -1,4 +1,7 @@
 # trainer.py
+# entrenament de la resnet18 pre-entrenada en dues fases: primer nomes el cap
+# amb el backbone congelat, i despres fine-tuning complet amb lr diferencial
+
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -23,7 +26,7 @@ class Trainer:
         self.save_path = save_path
         self.criterion = get_criterion()
 
-        # Fase 1: congelar backbone
+        # comenco sempre amb el backbone congelat (fase 1)
         self._freeze_backbone()
         self.optimizer = get_optimizer(model, unfreeze_backbone=False)
         self.scheduler = get_scheduler(self.optimizer)
@@ -72,6 +75,7 @@ class Trainer:
         print(f"  Backbone descongelat — entrenables: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
 
     def train_epoch(self, train_loader):
+        # una passada completa sobre el train, amb backprop
         self.model.train()
         running_loss, correct, total = 0.0, 0, 0
 
@@ -91,6 +95,7 @@ class Trainer:
         return running_loss / total, correct / total
 
     def validate_epoch(self, val_loader):
+        # igual que train_epoch pero sense actualitzar pesos (no_grad)
         self.model.eval()
         running_loss, correct, total = 0.0, 0, 0
 
@@ -107,6 +112,7 @@ class Trainer:
         return running_loss / total, correct / total
 
     def save_checkpoint(self, epoch, val_acc, val_loss):
+        # nomes guardo si millora la val_acc, aixi sempre tinc el millor model al disc
         if val_acc > self.best_val_acc:
             self.best_val_acc = val_acc
             self.best_epoch   = epoch
@@ -132,6 +138,7 @@ class Trainer:
 
         for epoch in range(1, num_epochs + 1):
 
+            # quan acaben les epoques de fase 1, descongelo i canvio optimizer/scheduler
             if epoch == epochs_phase1 + 1:
                 print(f"\n{'='*60}")
                 print(f"FASE 2: Fine-tuning complet (backbone descongelat)")
@@ -140,6 +147,7 @@ class Trainer:
                 self.optimizer = get_optimizer(self.model, unfreeze_backbone=True)
                 self.scheduler = get_scheduler(self.optimizer)
                 if self.early_stopping is not None:
+                    # reinicio l'early stopping perque la loss "salta" en canviar de fase
                     self.early_stopping = EarlyStopping(
                         patience=config.EARLY_STOPPING_PATIENCE
                     )
@@ -173,6 +181,7 @@ class Trainer:
         return self.history
 
     def load_best_model(self):
+        # carrego el checkpoint amb millor val_acc, per fer l'avaluacio final amb ell
         checkpoint = torch.load(self.save_path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         print(f"\n Millor model carregat "
@@ -180,6 +189,8 @@ class Trainer:
         return checkpoint
 
     def plot_history(self):
+        # grafica accuracy i loss de train/val, marcant on comença la fase 2
+        # i on esta el millor model
         epochs       = range(1, len(self.history['accuracy']) + 1)
         phase_change = next(
             (i + 1 for i, p in enumerate(self.history['phase']) if p == 2), None
