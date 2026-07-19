@@ -20,7 +20,7 @@ matplotlib.use('Agg')  # backend sense interfície gràfica
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import cross_val_score, KFold, GroupKFold
 
-# ── CONFIGURACIÓ ──────────────────────────────────────────────────────────────
+# CONFIGURACIÓ
 INPUT_DIR  = r"C:\Users\Alex\PycharmProjects\PythonProject"
 OUTPUT_DIR = r"C:\Users\Alex\PycharmProjects\PythonProject\correlacions_multivariades"
 
@@ -32,14 +32,15 @@ N_ESTIMATORS = 100
 N_SPLITS     = 5
 RANDOM_STATE = 42
 
+# columnes que no son features (metadata del pacient), per no ficar-les al model
 NON_FEATURE_COLS = {
     'PatientID', 'Phase', 'Slice_No', 'Label',
     'Patient_group', 'Height', 'Weight', 'Patient_Information'
 }
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def load_pair(dataset, phase, level):
+    # carrego els dos csv (features manuals i features interm de la xarxa) i els junto
     manual_csv = os.path.join(INPUT_DIR, f"summary_{dataset}_{phase}_{level}.csv")
     interm_csv = os.path.join(INPUT_DIR, f"interm_{dataset}_{phase}_{level}.csv")
 
@@ -62,6 +63,7 @@ def load_pair(dataset, phase, level):
 
 
 def get_feature_columns(df):
+    # separo quines columnes son features manuals i quines son les 256 dim de interm
     manual_cols = [c for c in df.columns
                    if c not in NON_FEATURE_COLS and not c.startswith('interm_')]
     interm_cols = [c for c in df.columns if c.startswith('interm_')]
@@ -91,6 +93,7 @@ def evaluate_feature(df, manual_feature, interm_cols, level):
         cv = GroupKFold(n_splits=N_SPLITS)
         splitter = cv.split(X, y, groups=groups)
     else:
+        # per pacient ja no cal groupkfold, cada fila es un pacient diferent
         cv = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
         splitter = cv.split(X, y)
 
@@ -110,6 +113,7 @@ def evaluate_feature(df, manual_feature, interm_cols, level):
 
 
 def plot_results(results_df, title, output_png):
+    # nomes ensenyo les 25 features amb millor R2, amb colors segons si es bo/moderat/dolent
     top = results_df.sort_values('R2_mean', ascending=False).head(25)
     colors = ['green' if v > 0.7 else 'orange' if v > 0.4 else 'red'
               for v in top['R2_mean']]
@@ -130,6 +134,7 @@ def plot_results(results_df, title, output_png):
 
 
 def process_combination(dataset, phase, level):
+    # per cada combinacio (dataset, phase, level) carrego, avaluo totes les features i guardo resultats
     prefix = f"{dataset}_{phase}_{level}"
     print(f"\n{'='*60}")
     print(f"Processant: {prefix}")
@@ -175,6 +180,7 @@ def process_combination(dataset, phase, level):
 
 
 def main():
+    # recorro totes les combinacions de dataset x phase x level i les processo una a una
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     for dataset in DATASETS:
         for phase in PHASES:
