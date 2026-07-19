@@ -1,4 +1,6 @@
 # evaluation.py
+# funcions per avaluar els models (resnet i cnn), tant per slice com per pacient (vot majoritari)
+
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -53,7 +55,7 @@ def predict_patients(model, patient_data, patient_to_group, label_encoder, devic
     Usa sempre SliceDataset + get_val_transforms(), el mateix pipeline
     amb què s'entrenen totes dues xarxes (CNN i ResNet18).
     """
-    # Import aquí per evitar dependències circulars
+    # import aqui dins per no crear import circular amb data_loader
     from data_loader import SliceDataset, get_val_transforms
     import config
 
@@ -65,7 +67,8 @@ def predict_patients(model, patient_data, patient_to_group, label_encoder, devic
         for pacient_id, slices in patient_data.items():
             group = patient_to_group[pacient_id]
 
-            # Crear dataset temporal per aquest pacient amb normalització correcta
+            # dataset "de mentida" nomes per poder passar les slices d'aquest pacient
+            # pel mateix pipeline de transform que en el train
             dummy_labels = np.zeros(len(slices), dtype=np.int64)
             ds = SliceDataset(slices, dummy_labels, transform=val_transform)
             dl = DataLoader(ds, batch_size=32, shuffle=False, num_workers=0)
@@ -105,7 +108,7 @@ def analyze_patients(pacient_predictions, label_encoder, dataset_name=""):
     print(f"{'='*60}")
     print(f"Total pacients: {len(pacient_predictions)}")
 
-    # Agrupar per classe
+    # agrupo els pacients per classe real, per treure estadistiques despres
     pacients_per_classe = {}
     for pid, info in pacient_predictions.items():
         cls = info['group']
@@ -115,7 +118,7 @@ def analyze_patients(pacient_predictions, label_encoder, dataset_name=""):
     for cls, pids in pacients_per_classe.items():
         print(f"  {cls}: {len(pids)} pacients")
 
-    # Estadístiques per classe
+    # accuracy per pacient (slice a slice, sense vot encara), classe per classe
     print(f"\n{'='*60}")
     print(f"ESTADISTIQUES PER CLASSE ({dataset_name})")
     print(f"{'='*60}")
@@ -135,7 +138,7 @@ def analyze_patients(pacient_predictions, label_encoder, dataset_name=""):
         print(f"  " + "-"*48)
         print(f"  Mitjana: {np.mean(accs):.3f}  Desv: {np.std(accs):.3f}")
 
-    # Vot majoritari per pacient
+    # aqui ja fem vot majoritari: cada pacient es queda amb la classe mes votada entre les seves slices
     print(f"\n{'='*60}")
     print(f"MATRIU DE CONFUSIO PER PACIENTS - {dataset_name} (VOT MAJORITARI)")
     print(f"{'='*60}")
