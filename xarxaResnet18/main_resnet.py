@@ -1,4 +1,7 @@
 # main_resnet.py
+# script principal per entrenar (o carregar) la resnet18, avaluar-la per slice
+# i per pacient sobre train/val/test, i treure un resum final comparant-ho tot
+
 import torch
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
@@ -24,9 +27,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Dispositiu: {device}")
 
-    # ──────────────────────────────────────────────
     # CONFIGURACIÓ
-    # ──────────────────────────────────────────────
+    # si USE_PRETRAINED es True em salto l'entrenament i nomes carrego el checkpoint
     USE_PRETRAINED        = False
     PRETRAINED_MODEL_PATH = "best_model_resnet18.pth"
     INTERMEDIATE_SIZE     = 256
@@ -44,9 +46,7 @@ def main():
     print(f"  Early stopping:  {config.USE_EARLY_STOPPING}")
     print(f"  Use pretrained:  {USE_PRETRAINED}")
 
-    # ──────────────────────────────────────────────
-    # 1. CÀRREGA DE DADES
-    # ──────────────────────────────────────────────
+    # CÀRREGA DE DADES
     print("\n" + "="*60)
     print("CÀRREGA DE DADES")
     print("="*60)
@@ -60,9 +60,8 @@ def main():
     print(f"\n  Pacients TRAIN: {len(patient_data_train)}")
     print(f"  Pacients TEST:  {len(patient_data_test)}")
 
-    # ──────────────────────────────────────────────
-    # 2. SPLIT TRAIN / VALIDATION
-    # ──────────────────────────────────────────────
+    # SPLIT TRAIN / VALIDATION
+    # split per pacient, no per slice
     train_ids, val_ids, _ = patient_stratified_split(
         patient_data_train, patient_to_group_train
     )
@@ -70,9 +69,7 @@ def main():
     print(f"  Train: {len(train_ids)} pacients")
     print(f"  Val:   {len(val_ids)} pacients")
 
-    # ──────────────────────────────────────────────
-    # 3. ARRAYS DE SLICES
-    # ──────────────────────────────────────────────
+    # ARRAYS DE SLICES
     X_train, y_train = build_slice_arrays(
         train_ids, patient_data_train, patient_to_group_train
     )
@@ -86,23 +83,20 @@ def main():
     print(f"  X_val:   {X_val.shape}")
     print(f"  X_test:  {X_test.shape}")
 
-    # ──────────────────────────────────────────────
-    # 4. OVERSAMPLING
-    # ──────────────────────────────────────────────
+    # OVERSAMPLING
+    # nomes al train, val i test es queden igual
     X_train, y_train = apply_oversampling(X_train, y_train)
 
-    # ──────────────────────────────────────────────
-    # 5. ANÀLISI DE DADES
-    # ──────────────────────────────────────────────
+    # ANÀLISI DE DADES
+    # miro les imatges de tot el dataset junt (train+val+test) per veure com son
     X_all = np.concatenate([X_train, X_val, X_test])
     analyze_global_images(X_all)
     plot_sample_images(X_all)
     plot_global_histogram(X_all)
     analyze_background(X_all)
 
-    # ──────────────────────────────────────────────
-    # 6. CODIFICAR ETIQUETES
-    # ──────────────────────────────────────────────
+    # CODIFICAR ETIQUETES
+    # fit amb totes les etiquetes juntes per assegurar el mateix mapping a tot arreu
     label_encoder = LabelEncoder()
     label_encoder.fit(np.concatenate([y_train, y_val, y_test]))
 
@@ -122,16 +116,12 @@ def main():
         y_train_enc, y_val_enc, y_test_enc
     )
 
-    # ──────────────────────────────────────────────
-    # 7. DATALOADERS
-    # ──────────────────────────────────────────────
+    # DATALOADERS
     train_loader, val_loader, test_loader = create_dataloaders(
         X_train, y_train_enc, X_val, y_val_enc, X_test, y_test_enc
     )
 
-    # ──────────────────────────────────────────────
-    # 8. MODEL
-    # ──────────────────────────────────────────────
+    # MODEL
     print("\n" + "="*60)
     print("MODEL RESNET18")
     print("="*60)
@@ -147,9 +137,7 @@ def main():
                                     intermediate_size=INTERMEDIATE_SIZE)
         skip_training = False
 
-    # ──────────────────────────────────────────────
-    # 9. ENTRENAMENT EN 2 FASES
-    # ──────────────────────────────────────────────
+    # ENTRENAMENT EN 2 FASES
     if not skip_training:
         print("\n" + "="*60)
         print("ENTRENAMENT (2 fases)")
@@ -166,9 +154,7 @@ def main():
     else:
         print("\n  Saltant entrenament (model pre-carregat)")
 
-    # ──────────────────────────────────────────────
-    # 10. AVALUACIÓ PER PACIENTS
-    # ──────────────────────────────────────────────
+    # AVALUACIÓ PER PACIENTS
     print("\n" + "="*60)
     print("AVALUACIÓ PER PACIENTS")
     print("="*60)
@@ -191,9 +177,7 @@ def main():
     )
     analyze_patients(pacient_pred_test, label_encoder, "TEST")
 
-    # ──────────────────────────────────────────────
-    # 11. AVALUACIÓ PER SLICES
-    # ──────────────────────────────────────────────
+    # AVALUACIÓ PER SLICES
     print("\n" + "="*60)
     print("AVALUACIÓ PER SLICES")
     print("="*60)
@@ -212,9 +196,8 @@ def main():
     val_acc   = evaluate_slices(y_val_enc,   y_pred_val,   label_encoder, "VALIDACIÓ")
     test_acc  = evaluate_slices(y_test_enc,  y_pred_test,  label_encoder, "TEST")
 
-    # ──────────────────────────────────────────────
-    # 12. RESUM FINAL
-    # ──────────────────────────────────────────────
+    # RESUM FINAL
+    # accuracy per pacient amb vot majoritari, per comparar amb la de slice
     def calc_patient_acc(pred_dict):
         true_l = [info['group_encoded'] for info in pred_dict.values()]
         pred_l = [np.bincount(info['y_pred']).argmax() for info in pred_dict.values()]
