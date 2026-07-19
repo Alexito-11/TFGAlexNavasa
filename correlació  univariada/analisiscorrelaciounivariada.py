@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import squareform
 
-# ── CONFIGURACIÓ ──────────────────────────────────────────────────────────────
+# CONFIGURACIÓ
 INPUT_DIR  = r"C:\Users\Alex\PycharmProjects\PythonProject"
 OUTPUT_DIR = r"C:\Users\Alex\PycharmProjects\PythonProject\correlacions_univariades"
 
@@ -30,11 +30,11 @@ LEVELS   = ["per_slice", "per_pacient"]   # nivells d'agregació
 THRESHOLD = 0.6   # llindar per a la visualització (no afecta el càlcul ni el CSV complet)
 TOP_N     = 5     # nombre de millors dimensions interm a guardar per cada feature manual
 
+# columnes que no son features (metadata del pacient), per no ficar-les al calcul
 NON_FEATURE_COLS = {
     'PatientID', 'Phase', 'Slice_No', 'Label',
     'Patient_group', 'Height', 'Weight', 'Patient_Information'
 }
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def load_pair(dataset, phase, level):
@@ -62,6 +62,7 @@ def load_pair(dataset, phase, level):
 
 
 def get_feature_columns(df):
+    # separo columnes manuals de les 256 dim interm de la xarxa
     manual_cols = [c for c in df.columns
                    if c not in NON_FEATURE_COLS and not c.startswith('interm_')]
     interm_cols = [c for c in df.columns if c.startswith('interm_')]
@@ -141,6 +142,7 @@ def _cluster_order(matrix, axis=0):
         link  = linkage(squareform(dist, checks=False), method='ward')
         order = leaves_list(link)
     except Exception:
+        # si el clustering falla per algun motiu, deixo l'ordre original
         order = np.arange(n)
     return order
 
@@ -169,6 +171,7 @@ def plot_heatmap(corr_df, threshold, title, output_png):
     fig, ax = plt.subplots(figsize=(28, max(6, len(manual_ordered) * 0.3)))
     im = ax.imshow(corr_ordered, aspect='auto', cmap='RdBu_r', vmin=-1, vmax=1)
 
+    # nomes mostro 1 de cada "step" etiquetes a l'eix x perque no se solapin (son 256)
     step = max(1, len(interm_ordered) // 30)
     ax.set_xticks(range(0, len(interm_ordered), step))
     ax.set_xticklabels(interm_ordered[::step], rotation=90, fontsize=6)
@@ -188,6 +191,7 @@ def plot_heatmap(corr_df, threshold, title, output_png):
 
 
 def process_combination(dataset, phase, level):
+    # per cada combinacio calculo la matriu de correlacio i genero els 3 outputs
     prefix = f"{dataset}_{phase}_{level}"
     print(f"\n{'='*60}")
     print(f"Processant: {prefix}")
@@ -206,12 +210,12 @@ def process_combination(dataset, phase, level):
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 1. Matriu completa
+    # matriu completa
     matrix_csv = os.path.join(OUTPUT_DIR, f"{prefix}_correlation_matrix.csv")
     corr_df.to_csv(matrix_csv)
     print(f"  Guardat: {matrix_csv}")
 
-    # 2. Top correlacions
+    # top correlacions per feature
     top_csv = os.path.join(OUTPUT_DIR, f"{prefix}_top_correlations.csv")
     top_df  = save_top_correlations(corr_df, top_csv)
     print(f"  Guardat: {top_csv}")
@@ -222,7 +226,7 @@ def process_combination(dataset, phase, level):
         for _, r in top_global.head(3).iterrows():
             print(f"    {r['Manual_Feature']:<25} ↔ {r['Interm']:<12} r={r['Correlation']:.4f}")
 
-    # 3. Heatmap
+    # heatmap amb clustering
     heatmap_png = os.path.join(OUTPUT_DIR, f"{prefix}_heatmap.png")
     plot_heatmap(corr_df, THRESHOLD,
                 title=f"Correlació univariada — {dataset.upper()} {phase} ({level})",
@@ -231,6 +235,7 @@ def process_combination(dataset, phase, level):
 
 
 def main():
+    # recorro totes les combinacions de dataset x phase x level i les processo una a una
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     for dataset in DATASETS:
         for phase in PHASES:
