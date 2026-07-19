@@ -1,4 +1,7 @@
 # data_analysis.py
+# funcions per explorar les dades: estadistiques globals de les imatges, histogrames,
+# analisi del background/foreground i balanceig de classes entre train/val/test
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -21,6 +24,7 @@ def analyze_global_images(X_all):
 
 def plot_sample_images(X_all, num_exemples=5):
     """Mostra exemples d'imatges"""
+    # trio imatges random per fer-me una idea visual de com son les slices
     idx_mostrar = np.random.choice(len(X_all), min(num_exemples, len(X_all)), replace=False)
 
     fig, axes = plt.subplots(1, len(idx_mostrar), figsize=(15, 3))
@@ -39,6 +43,7 @@ def plot_sample_images(X_all, num_exemples=5):
 
 def plot_global_histogram(X_all):
     """Histograma global de tots els píxels"""
+    # distribucio de valors de pixel de tot el dataset, amb mitjana i +-1 desviacio marcades
     plt.figure(figsize=(10, 5))
     plt.hist(X_all.flatten(), bins=100, color='steelblue', alpha=0.7, edgecolor='black')
     plt.axvline(X_all.mean(), color='red', linestyle='--', linewidth=2,
@@ -57,6 +62,7 @@ def plot_global_histogram(X_all):
 
 def analyze_background(X_all):
     """Analitza el background de les imatges"""
+    # tot el que esta per sota del 10% del maxim el considero background (fons negre)
     threshold = 0.1 * X_all.max()
     pixels_bg = X_all[X_all <= threshold]
     pixels_fg = X_all[X_all > threshold]
@@ -79,6 +85,7 @@ def analyze_background(X_all):
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
+    # aqui trec el background per veure millor la distribucio real del teixit
     axes[1].hist(pixels_fg, bins=50, color='green', alpha=0.7)
     axes[1].set_xlabel('Valor del pixel')
     axes[1].set_ylabel('Frequencia')
@@ -131,6 +138,7 @@ def analyze_class_balance(y_train_enc, y_val_enc, y_test_enc, label_encoder):
     print("METRIQUES DE DESBALEIG")
     print("=" * 60)
 
+    # ratio entre la classe mes gran i la mes petita, per veure com de desbalancejat esta cada split
     train_ratio = max(train_counts) / min(train_counts[train_counts > 0])
     val_ratio   = max(val_counts)   / min(val_counts[val_counts > 0])   if len(val_counts)  > 0 else 0
     test_ratio  = max(test_counts)  / min(test_counts[test_counts > 0]) if len(test_counts) > 0 else 0
@@ -146,6 +154,7 @@ def analyze_class_balance(y_train_enc, y_val_enc, y_test_enc, label_encoder):
 def plot_class_distribution(train_counts, val_counts, test_counts, label_encoder,
                             y_train_enc, y_val_enc, y_test_enc):
     """Gràfics de distribució de classes"""
+    # 4 subplots (nomes n'utilitzo 3): train, val i test, cadascun amb el % a sobre de la barra
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
     ax1 = axes[0, 0]
