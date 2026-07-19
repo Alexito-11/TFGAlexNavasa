@@ -1,4 +1,7 @@
 # data_loader.py
+# pipeline de dades per la resnet18: llegir volums nifti ACDC, fer slices 2D amb
+# normalitzacio ImageNet, split per pacient, oversampling i dataloaders
+
 import re
 import numpy as np
 import cv2
@@ -13,7 +16,7 @@ from torchvision import transforms
 import config
 
 
-# ─── Transformacions ImageNet ──────────────────────────────────────────────────
+# Transformacions ImageNet
 # ResNet18 va ser pre-entrenada amb imatges RGB normalitzades amb mean/std
 # d'ImageNet. Hem de replicar exactament aquesta normalització, altrament
 # els pesos pre-entrenats no funcionaran correctament.
@@ -62,14 +65,14 @@ class SliceDataset(Dataset):
     def __getitem__(self, idx):
         img = self.X[idx]  # (H, W) float32
 
-        # Escalar a [0, 255] uint8 per ToPILImage
+        # escalo a 0-255 uint8 perque ToPILImage ho necessita aixi
         img_min, img_max = img.min(), img.max()
         if img_max - img_min > 1e-8:
             img_u8 = ((img - img_min) / (img_max - img_min) * 255).astype(np.uint8)
         else:
             img_u8 = np.zeros_like(img, dtype=np.uint8)
 
-        # Replicar a 3 canals: (H, W) → (H, W, 3)
+        # replico el canal 3 cops (H, W) → (H, W, 3), es un "RGB fals"
         img_rgb = np.stack([img_u8, img_u8, img_u8], axis=-1)
 
         if self.transform:
@@ -83,9 +86,10 @@ class SliceDataset(Dataset):
         return tensor, label
 
 
-# ─── Càrrega i processament de dades ──────────────────────────────────────────
+# Càrrega i processament de dades
 
 def read_group_from_info(info_path: Path):
+    # llegeixo el grup (patologia) del Info.cfg de cada pacient
     with open(info_path, "r") as f:
         for line in f:
             if "Group" in line:
@@ -94,6 +98,7 @@ def read_group_from_info(info_path: Path):
 
 
 def choose_frame_gt(patient_dir: Path, phase: str):
+    # busco els frames amb ground truth i em quedo amb ED (primer) o ES (ultim)
     pid    = patient_dir.name
     frames = list(patient_dir.glob(f"{pid}_frame*_gt.nii.gz"))
     if not frames:
@@ -108,6 +113,8 @@ def choose_frame_gt(patient_dir: Path, phase: str):
 
 
 def process_patient_volume(vol, patient_id=""):
+    # trec les slices del volum, redimensiono a 224x224, descarto les buides
+    # i normalitzo (z-score) cada slice
     pacient_slices    = []
     slices_descartades = 0
     target_size       = config.TARGET_SIZE  # (224, 224)
@@ -127,6 +134,7 @@ def process_patient_volume(vol, patient_id=""):
 
         print(f"    {len(pacient_slices)} slices vàlides ({slices_descartades} descartades)")
     else:
+        # cas rar: volum ja ve en 2D
         img2d         = vol.astype(np.float32)
         img2d_resized = cv2.resize(img2d, target_size, interpolation=cv2.INTER_AREA)
         img2d_resized = (img2d_resized - img2d_resized.mean()) / (img2d_resized.std() + 1e-8)
@@ -136,6 +144,7 @@ def process_patient_volume(vol, patient_id=""):
 
 
 def load_dataset(base_dir, phase):
+    # recorre tots els pacients de base_dir, llegeix grup i frame gt, processa slices
     patient_data     = {}
     patient_to_group = {}
     total_desc       = 0
@@ -171,6 +180,7 @@ def load_dataset(base_dir, phase):
 
 
 def patient_stratified_split(patient_data, patient_to_group, test_size=0.2):
+    # split train/val per pacient, no per slice
     patient_ids    = np.array(list(patient_data.keys()))
     patient_groups = np.array([patient_to_group[pid] for pid in patient_ids])
 
@@ -184,6 +194,7 @@ def patient_stratified_split(patient_data, patient_to_group, test_size=0.2):
 
 
 def build_slice_arrays(patient_ids, patient_data, patient_to_group):
+    # aplano les slices de tots els pacients d'un split en X, y
     X_list, y_list = [], []
     for pid in patient_ids:
         for sl in patient_data[pid]:
@@ -193,6 +204,7 @@ def build_slice_arrays(patient_ids, patient_data, patient_to_group):
 
 
 def apply_oversampling(X_train, y_train):
+    # oversampling amb reemplaçament per igualar totes les classes a la majoritaria
     print("\n" + "="*60)
     print("OVERSAMPLING")
     print("="*60)
