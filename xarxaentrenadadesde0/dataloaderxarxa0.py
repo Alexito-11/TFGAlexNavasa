@@ -1,3 +1,7 @@
+# data_loader.py
+# tot el pipeline de dades: llegir els volums nifti de l'ACDC, retallar en slices 2D,
+# fer el split per pacient, oversampling i preparar els dataloaders per la CNN
+
 import re
 import numpy as np
 import cv2
@@ -14,10 +18,9 @@ from torchvision import transforms
 import config
 
 
-# ─────────────────────────────────────────────────────────────────────
 # TRANSFORMS PER CNN DES DE ZERO
-# ─────────────────────────────────────────────────────────────────────
 def get_train_transforms():
+    # augmentation suau nomes per train: flip, rotacio petita i translacio petita
     return transforms.Compose([
         transforms.ToPILImage(),
         transforms.RandomHorizontalFlip(p=0.5),
@@ -28,15 +31,14 @@ def get_train_transforms():
 
 
 def get_val_transforms():
+    # val/test sense augmentation, nomes passar a tensor
     return transforms.Compose([
         transforms.ToPILImage(),
         transforms.ToTensor(),
     ])
 
 
-# ─────────────────────────────────────────────────────────────────────
 # DATASET
-# ─────────────────────────────────────────────────────────────────────
 class SliceDataset(Dataset):
     """
     Dataset de slices cardíaques per CNN des de zero.
@@ -54,12 +56,14 @@ class SliceDataset(Dataset):
     def __getitem__(self, idx):
         img = self.X[idx]
 
+        # normalitzo a 0-255 per poder-ho tractar com imatge normal (uint8)
         img_min, img_max = img.min(), img.max()
         if img_max - img_min > 1e-8:
             img_u8 = ((img - img_min) / (img_max - img_min) * 255).astype(np.uint8)
         else:
             img_u8 = np.zeros_like(img, dtype=np.uint8)
 
+        # replico el canal 3 cops perque les transforms/resnet esperen RGB
         img_rgb = np.stack([img_u8, img_u8, img_u8], axis=-1)
 
         if self.transform is not None:
@@ -73,10 +77,9 @@ class SliceDataset(Dataset):
         return img_tensor, label
 
 
-# ─────────────────────────────────────────────────────────────────────
 # LECTURA DADES
-# ─────────────────────────────────────────────────────────────────────
 def read_group_from_info(info_path: Path):
+    # llegeixo el grup (patologia) del fitxer Info.cfg de cada pacient
     with open(info_path, "r") as f:
         for line in f:
             if "Group" in line:
@@ -85,6 +88,8 @@ def read_group_from_info(info_path: Path):
 
 
 def choose_frame_gt(patient_dir: Path, phase: str):
+    # busco els frames amb ground truth d'aquest pacient i em quedo amb ED o ES
+    # segons la fase (ED = primer frame, ES = ultim)
     pid = patient_dir.name
     frames = list(patient_dir.glob(f"{pid}_frame*_gt.nii.gz"))
     if not frames:
@@ -99,6 +104,8 @@ def choose_frame_gt(patient_dir: Path, phase: str):
 
 
 def process_patient_volume(vol, patient_id=""):
+    # trec les slices 2D del volum 3D, les redimensiono a target_size,
+    # descarto les buides/soroll (variancia baixa) i normalitzo (z-score)
     patient_slices = []
     discarded_slices = 0
     target_size = config.TARGET_SIZE
@@ -117,6 +124,7 @@ def process_patient_volume(vol, patient_id=""):
 
         print(f"    {len(patient_slices)} slices vàlides ({discarded_slices} descartades)")
     else:
+        # cas rar: volum ja es 2D directament
         img2d = vol.astype(np.float32)
         img2d_resized = cv2.resize(img2d, target_size, interpolation=cv2.INTER_AREA)
         img2d_resized = (img2d_resized - img2d_resized.mean()) / (img2d_resized.std() + 1e-8)
@@ -126,6 +134,8 @@ def process_patient_volume(vol, patient_id=""):
 
 
 def load_dataset(base_dir, phase):
+    # recorre totes les carpetes de pacients dins base_dir, llegeix el grup,
+    # tria el frame gt segons la fase i processa el volum en slices
     patient_data = {}
     patient_to_group = {}
     total_discarded = 0
@@ -163,10 +173,10 @@ def load_dataset(base_dir, phase):
     return patient_data, patient_to_group
 
 
-# ─────────────────────────────────────────────────────────────────────
 # SPLIT I PREPARACIÓ
-# ─────────────────────────────────────────────────────────────────────
 def patient_stratified_split(patient_data, patient_to_group, test_size=0.2):
+    # split train/val fet a nivell de pacient (no de slice) per no tenir
+    # slices del mateix pacient repartides entre train i val
     patient_ids = np.array(list(patient_data.keys()))
     patient_groups = np.array([patient_to_group[pid] for pid in patient_ids])
 
@@ -187,6 +197,7 @@ def patient_stratified_split(patient_data, patient_to_group, test_size=0.2):
 
 
 def build_slice_arrays(patient_ids, patient_data, patient_to_group):
+    # aplano les slices de tots els pacients d'un split en un unic array X, y
     X_list, y_list = [], []
 
     for pid in patient_ids:
@@ -200,6 +211,7 @@ def build_slice_arrays(patient_ids, patient_data, patient_to_group):
 
 
 def apply_oversampling(X_train, y_train):
+    # oversampling amb reemplaçament per igualar totes les classes a la majoritaria
     print("\n" + "=" * 60)
     print("OVERSAMPLING")
     print("=" * 60)
@@ -242,9 +254,7 @@ def apply_oversampling(X_train, y_train):
     return X_balanced, y_balanced
 
 
-# ─────────────────────────────────────────────────────────────────────
 # DATALOADERS
-# ─────────────────────────────────────────────────────────────────────
 def create_dataloaders(X_train, y_train_enc, X_val, y_val_enc, X_test, y_test_enc):
     """
     Crea DataLoaders per la CNN des de zero.
