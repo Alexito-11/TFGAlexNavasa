@@ -5,9 +5,7 @@ import numpy as np
 import torch
 from pathlib import Path
 
-# ================================
 # PARÀMETRES GLOBALS
-# ================================
 SEED = 42
 Phase = "ES"
 
@@ -22,7 +20,7 @@ NUM_EPOCHS =300
 # ResNet18 espera 224x224 (era 128x128 → incorrecte)
 TARGET_SIZE = (224, 224)
 
-# Early stopping activat per evitar overfitting
+# early stopping desactivat de moment (queda implementat per si el vull activar despres)
 USE_EARLY_STOPPING = False
 EARLY_STOPPING_PATIENCE = 15
 
