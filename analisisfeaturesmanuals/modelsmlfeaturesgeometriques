@@ -1,7 +1,8 @@
-# ─────────────────────────────────────────────────────────────
-# MODELS DE MACHINE LEARNING — NOMÉS FEATURES GEOMÈTRIQUES
-# Classificació de 5 patologies cardíaques (ACDC) a nivell de pacient.
-# ─────────────────────────────────────────────────────────────
+# models_ml.py
+# provo diferents models de ML clàssic (nomes amb features geometriques, sense
+# textura/intensitat) per classificar les 5 patologies de l'ACDC a nivell de pacient,
+# i comparo importancia de features (permutation + SHAP) entre tots ells
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -30,8 +31,8 @@ import matplotlib
 matplotlib.use("Agg")   # només si guardes figures en lloc de mostrar-les
 
 
-# ── CONFIGURACIÓ GENERAL ──────────────────────────────────────
-PHASE = 'ED'                   # ED o ES (sístole / diàstole)
+# CONFIGURACIÓ GENERAL
+PHASE = 'ES'                   # ED o ES (sístole / diàstole)
 SCORING = 'accuracy'
 RANDOM_STATE = 42
 CV_SPLITS = 5
@@ -44,7 +45,7 @@ EXPLAIN_ALL_TEST = True
 EXPLAIN_TEST_SUBSAMPLE = 500
 
 
-# ── CÀRREGA I PREPROCESSAT ────────────────────────────────────
+# CÀRREGA I PREPROCESSAT
 df_train = pd.read_csv('summary_training.csv')
 df_test  = pd.read_csv('summary_testing.csv')
 
@@ -64,6 +65,8 @@ feature_cols = (
 
 
 def reducir_features_correlacionadas(df, features, threshold=0.97):
+    # busco parelles de features molt correlacionades (|r|>threshold) i em quedo
+    # nomes amb un representant de cada grup, per no duplicar informacio
     corr_matrix = df[features].corr().abs()
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
 
@@ -126,7 +129,7 @@ y_all_test  = df_test.loc[mask_te, 'Patient_group'].values
 
 classes_ = np.unique(y_all_train)
 
-# ── Verificació ràpida (pots comentar-ho un cop confirmat) ─────
+# Verificació ràpida (pots comentar-ho un cop confirmat)
 print(f"\nFeatures geomètriques usades ({len(feature_cols)}): {feature_cols}")
 print(f"Train: {X_all_train.shape} | Test: {X_all_test.shape}")
 print(f"Classes: {classes_}")
@@ -134,8 +137,9 @@ print(f"Classes: {classes_}")
 CV = StratifiedKFold(n_splits=CV_SPLITS, shuffle=True, random_state=RANDOM_STATE)
 
 
-# ── FUNCIONS AUXILIARS ────────────────────────────────────────
+# FUNCIONS AUXILIARS
 def run_grid(name, estimator, param_grid, X, y):
+    # gridsearch generic amb CV estratificat, imprimeix els millors params i el top5
     grid = GridSearchCV(
         estimator=estimator,
         param_grid=param_grid,
@@ -157,6 +161,8 @@ def run_grid(name, estimator, param_grid, X, y):
 
 
 def perm_importance_test(model, X_test, y_test, title_prefix):
+    # permutation importance sobre el test: mesura com baixa l'accuracy si
+    # es barreja aleatoriament cada feature, una a una
     perm = permutation_importance(
         model, X_test, y_test,
         n_repeats=N_REPEATS_PERM,
@@ -180,8 +186,10 @@ def perm_importance_test(model, X_test, y_test, title_prefix):
     return perm
 
 
-# ── SHAP helpers ──────────────────────────────────────────────
+# SHAP helpers
 def _shap_to_3d(shap_values, class_names):
+    # normalitzo el format de sortida del SHAP (a vegades ve com llista, a vegades com array)
+    # a un unic format (samples, features, classes)
     if isinstance(shap_values, list):
         return np.stack(shap_values, axis=-1)
     sv = np.asarray(shap_values)
@@ -191,6 +199,7 @@ def _shap_to_3d(shap_values, class_names):
 
 
 def _boxplots_per_class(abs_shap_3d, feat_names, class_names, prefix, figsize=(12, 6)):
+    # un boxplot de valors SHAP absoluts per cada classe, per veure dispersio de cada feature
     for i, cname in enumerate(class_names):
         df_shap = pd.DataFrame(abs_shap_3d[:, :, i], columns=feat_names)
         plt.figure(figsize=figsize)
@@ -202,16 +211,21 @@ def _boxplots_per_class(abs_shap_3d, feat_names, class_names, prefix, figsize=(1
 
 
 def shap_tree(model, X_test, feat_names, class_names, prefix):
+    # per models basats en arbres (RF, XGB) es pot usar TreeExplainer, molt mes rapid
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X_test)
     abs_all = np.abs(_shap_to_3d(shap_values, class_names))
     _boxplots_per_class(abs_all, feat_names, class_names, prefix)
     imp_mean = abs_all.mean(axis=(0, 2))
     imp_max  = abs_all.mean(axis=0).max(axis=1)
+    shap_ranking = pd.Series(imp_mean, index=feat_names).sort_values(ascending=False)
+    print(f"\nFeature importances (SHAP mean) - {model}:")
+    print(shap_ranking.to_string())
     return imp_mean, imp_max
 
 
 def shap_linear(model, X_train, X_test, feat_names, class_names, prefix):
+    # per models lineals hi ha un explainer especific, mes rapid que el kernel
     masker = shap.maskers.Independent(X_train)
     explainer = shap.LinearExplainer(model, masker=masker)
     shap_values = explainer.shap_values(X_test)
@@ -225,6 +239,8 @@ def shap_linear(model, X_train, X_test, feat_names, class_names, prefix):
 def shap_kernel(model, X_train, X_test, feat_names, class_names, prefix,
                 bg_kmeans=KMEANS_BG, nsamples=NSAMPLES_KERNEL,
                 explain_all=EXPLAIN_ALL_TEST, explain_n=EXPLAIN_TEST_SUBSAMPLE):
+    # per models "caixa negra" (SVM, MLP, KNN) fa falta el KernelExplainer,
+    # mes lent, per aixo reduim el background amb kmeans i limitem les mostres
 
     n_clusters = min(bg_kmeans, X_train.shape[0])
     background = shap.kmeans(X_train, n_clusters) if n_clusters >= 2 else X_train
@@ -246,7 +262,7 @@ def shap_kernel(model, X_train, X_test, feat_names, class_names, prefix,
     return imp_mean, imp_max
 
 
-# ── ENCODING D'ETIQUETES UNIFICAT ─────────────────────────────
+# ENCODING D'ETIQUETES UNIFICAT
 # Un únic LabelEncoder per a tots els models (abans KNN usava .cat.codes,
 # que era inconsistent). Amb 5 classes alfabètiques el mapatge és el mateix,
 # però així queda coherent i sense fragilitats.
@@ -256,7 +272,7 @@ y_test_enc  = le.transform(y_all_test)
 class_names = list(le.classes_)   # ['DCM','HCM','MINF','NOR','RV']
 
 
-# ── RANDOM FOREST ─────────────────────────────────────────────
+# RANDOM FOREST
 rf_param_grid = {
     'n_estimators': [100, 200, 300],
     'max_depth': [None, 4, 8],
@@ -304,7 +320,7 @@ plt.tight_layout()
 plt.show()
 
 
-# ── XGBOOST ───────────────────────────────────────────────────
+# XGBOOST
 xgb_param_grid = {
     'n_estimators': [100, 200, 300],
     'max_depth': [3, 6, 9],
@@ -340,7 +356,7 @@ print("\nSpearman XGB:")
 print(df_rank_xgb.corr(method='spearman').to_string())
 
 
-# ── SVM ───────────────────────────────────────────────────────
+# SVM
 svm_pipe = Pipeline([
     ('scaler', StandardScaler()),
     ('svc', SVC(random_state=RANDOM_STATE, probability=True))
@@ -375,7 +391,7 @@ print("\nSpearman SVM:")
 print(df_rank_svm.corr(method='spearman').to_string())
 
 
-# ── MLP ───────────────────────────────────────────────────────
+# MLP
 mlp_pipe = Pipeline([
     ('scaler', StandardScaler()),
     ('mlp', MLPClassifier(random_state=RANDOM_STATE, max_iter=500))
@@ -412,7 +428,7 @@ print("\nSpearman MLP:")
 print(df_rank_mlp.corr(method='spearman').to_string())
 
 
-# ── KNN (ara amb el mateix LabelEncoder que la resta) ─────────
+# KNN (ara amb el mateix LabelEncoder que la resta)
 knn_pipe = Pipeline([
     ('scaler', StandardScaler()),
     ('clf', KNeighborsClassifier())
@@ -447,7 +463,7 @@ print("\nSpearman KNN:")
 print(df_rank_knn.corr(method='spearman').to_string())
 
 
-# ── LOGISTIC REGRESSION ───────────────────────────────────────
+# LOGISTIC REGRESSION
 lr_pipe = Pipeline([
     ('scaler', StandardScaler()),
     ('clf', LogisticRegression(random_state=RANDOM_STATE))
@@ -496,7 +512,7 @@ print("\nSpearman LR:")
 print(df_rank_lr.corr(method='spearman').to_string())
 
 
-# ── RESUM FINAL ───────────────────────────────────────────────
+# RESUM FINAL
 print("\n===== RESUM ACCURACY TEST =====")
 print(f"RF : {acc_rf:.4f}")
 print(f"XGB: {acc_xgb:.4f}")
@@ -508,6 +524,7 @@ print(f"LR : {acc_lr:.4f}")
 results = []
 
 def add_result(name, y_true, y_pred):
+    # calculo un conjunt de metriques estandard per cada model, per comparar-les totes juntes
     results.append({
         'model': name,
         'accuracy': accuracy_score(y_true, y_pred),
@@ -546,8 +563,9 @@ if ties:
         print(f"{m}: {mods}")
 
 
-# ── PER CLASSE (F1) ───────────────────────────────────────────
+# PER CLASSE (F1)
 def per_class_report(name, y_true, y_pred):
+    # classification report en format taula, afegint quin model es, per poder concatenar-los
     rep = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
     df = pd.DataFrame(rep).T
     df['model'] = name
@@ -573,7 +591,7 @@ print("\n=== MILLOR MODEL PER CLASSE (F1) ===")
 print(best_f1_per_class.to_string(index=False))
 
 
-# ── SHAP absoluts per a tots els models (per als gràfics agregats) ──
+# SHAP absoluts per a tots els models (per als gràfics agregats)
 abs_rf  = np.abs(_shap_to_3d(shap.TreeExplainer(rf_estimator).shap_values(X_all_test),
                              rf_estimator.classes_))
 abs_xgb = np.abs(_shap_to_3d(shap.TreeExplainer(xgb_estimator).shap_values(X_all_test),
@@ -600,7 +618,9 @@ abs_lr = np.abs(_shap_to_3d(explainer_lr(X_all_test).values,
                             lr_estimator.named_steps['clf'].classes_))
 
 
-# ── TOP FEATURES PER CLASSE ───────────────────────────────────
+# TOP FEATURES PER CLASSE
+# per cada model miro quines 5 features son les mes importants per cada classe,
+# i compto quantes vegades hi apareix cada feature entre tots els models
 top_counts_per_class = {cls: Counter() for cls in class_names}
 shap_abs_all = [abs_rf, abs_xgb, abs_svm, abs_mlp, abs_knn, abs_lr]
 
@@ -632,7 +652,7 @@ df_summary = pd.DataFrame.from_dict(
 ).T.fillna(0).astype(int)
 
 
-# ── PERMUTATION IMPORTANCE MITJANA (TOP 10) ───────────────────
+# PERMUTATION IMPORTANCE MITJANA (TOP 10)
 df_perm_all = pd.DataFrame({
     'RF':  perm_rf.importances_mean,
     'XGB': perm_xgb.importances_mean,
