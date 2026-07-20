@@ -1,11 +1,127 @@
 # TFGAlexNavasa
 TFG 2026 Alex Navasa
 
+# Study of the intermediate representations of a neural network for cardiac disease prediction
 
-This repository contains the full pipeline developed for the classification of five cardiac pathologies from the ACDC dataset, combining a deep learning approach with a classical machine learning baseline built on handcrafted geometric descriptors.
+Bachelor's thesis by Àlex Navasa.
 
-The deep learning component includes data loading and preprocessing for cardiac MRI slices (data_loader.py), model configuration (config.py), and evaluation utilities for both slice-level and patient-level analysis, including majority-vote aggregation and confusion matrices (evaluation.py). Exploratory analysis of the image data, such as intensity distributions and class balance across training, validation, and test sets, is provided in data_analysis.py.
+# Repository structure
 
-The classical machine learning component extracts geometric descriptors directly from the segmentation masks (quantification_methods.py) and compiles them into patient- and slice-level summary files (CSV). These descriptors are then used to train and compare several models, including Random Forest, XGBoost, SVM, MLP, KNN, and Logistic Regression, with feature importance assessed through permutation importance and SHAP values (modelsmlfeaturesgeometriques.py).
+    TFGAlexNavasa/
+    -CSV/
+    -analisisfeaturesmanuals/
+    -correlació univariada/
+    -correlació multivariada/
+    -xarxaResnet18/
+    -xarxaentrenadadesde0/
 
-Finally, the repository includes correlation analyses linking the handcrafted geometric descriptors to the internal representations learned by the neural network, both at a univariate level (analisiscorrelaciounivariada.py) and a multivariate level using Random Forest regression (analisiscorrelaciomultivariada.py). Results are exported as CSV files and heatmap or bar chart visualizations, organized in dedicated output folders.
+# Requirements
+
+- Python 3.x
+- PyTorch / torchvision (for the CNN modules)
+- pandas, numpy, scikit-learn (for the correlation analysis and the manual features)
+- matplotlib / seaborn (for the heatmaps and plots)
+
+# CSV
+
+Generation of the training and test datasets used to train the neural networks.
+
+Usage: run the generator script to create the training/testing CSV files before training
+any model.
+
+# analisisfeaturesmanuals
+
+Analysis of geometric features extracted manually from the images, and their
+quantification using classical Machine Learning models.
+
+- quantification_methods.py: quantification methods for the manual descriptors/features.
+- modelsmlfeaturesgeometriques.py: defines and trains ML models (non-neural) on the
+  extracted geometric features.
+
+Usage:
+
+    python quantification_methods.py
+    python modelsmlfeaturesgeometriques.py
+
+# correlació univariada
+
+Univariate correlation analysis between the features and the target variables, split by
+cardiac phase (ED/ES) and aggregation level (per patient / per slice).
+
+- analisiscorrelaciounivariada.py: main script; computes the correlation matrices,
+  generates the heatmaps and extracts the top correlations.
+
+Generated outputs:
+
+- *_correlation_matrix.csv: full correlation matrix
+- *_heatmap.png: visualisation of the correlation matrix
+- *_top_correlations.csv: list of the most relevant correlations
+
+These are generated for training/testing, ED/ES, and per patient/slice aggregation.
+
+Usage:
+
+    python analisiscorrelaciounivariada.py
+
+# correlació multivariada
+
+Multivariate correlation analysis (multiple regression, R2) between sets of features and
+the target variables.
+
+- analisiscorrelaciomultivariada.py: main script; fits the multivariate models and
+  computes the R2 coefficient.
+
+Generated outputs:
+
+- *_multivariate_R2.csv: numerical R2 results per model
+- *_multivariate_R2.png: visualisation of the results
+
+These are generated for training/testing, ED/ES, and per patient/slice aggregation.
+
+Usage:
+
+    python analisiscorrelaciomultivariada.py
+
+# xarxaResnet18
+
+CNN based on the ResNet18 architecture (transfer learning / feature extraction), used for
+image feature extraction and biomarker prediction.
+
+- config.py: model parameters (hyperparameters, paths, etc.).
+- data_loader.py: loading and preprocessing of the image data.
+- data_analysis.py: exploratory analysis of the input data.
+- model_resnet.py: definition of the ResNet18-based FeatureExtractor.
+- train_utils.py: helper functions for training.
+- trainer.py: training logic.
+- evaluation.py: evaluation of the trained model on the test set.
+- main_resnet.py: entry point, runs the full pipeline (loading, training, evaluation).
+
+Usage:
+
+    python main_resnet.py
+
+# xarxaentrenadadesde0
+
+CNN trained from scratch (without transfer learning), as a comparison against the ResNet18
+approach.
+
+- config.py: model parameters (hyperparameters, paths, etc.).
+- dataloaderxarxa0.py: loading and preprocessing of the image data.
+- modelxarxa0.py: definition of the CNN architecture trained from scratch.
+- train_utils.py: helper functions for training.
+- trainerxarxa0.py: TrainerCNN class, containing the training logic.
+- evaluationxarxa0.py: evaluation of the trained model on the test set.
+- mainxarxa0.py: entry point, runs the full pipeline (loading, training, evaluation).
+
+Usage:
+
+    python mainxarxa0.py
+
+Note: config.py and train_utils.py are the same files in both network folders
+(xarxaResnet18 and xarxaentrenadadesde0); they are duplicated because their contents are
+shared by both models.
+
+# Author
+
+Àlex Navasa — Bachelor's thesis
+
